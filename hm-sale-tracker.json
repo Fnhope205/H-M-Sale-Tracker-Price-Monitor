@@ -1,0 +1,283 @@
+{
+  "name": "H&M Sale Tracker & Price Monitor",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 30
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        -416,
+        -80
+      ],
+      "id": "79cb09cf-e4ca-4bfd-895f-23f392b333b6",
+      "name": "Schedule Trigger"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://production-sfo.browserless.io/content?token=YOUR_BROWSERLESS_TOKEN",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"url\": \"https://www2.hm.com/en_gb/ladies/sale/view-all.html\",\n  \"bestAttempt\": true,\n  \"waitForSelector\": {\n    \"selector\": \"a[href*=\\\"productpage\\\"]\",\n    \"timeout\": 15000\n  }\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        -224,
+        -80
+      ],
+      "id": "2ac12e21-c34d-4257-93b3-a2495b6db871",
+      "name": "HTTP Request"
+    },
+    {
+      "parameters": {
+        "operation": "extractHtmlContent",
+        "extractionValues": {
+          "values": [
+            {
+              "key": "cards",
+              "cssSelector": "li:has(a[href*=\"productpage\"])",
+              "returnValue": "html",
+              "returnArray": true
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.html",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        -80
+      ],
+      "id": "b26f20a7-4b04-444b-bf25-6a60d2e7b5b0",
+      "name": "HTML"
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first()?.json ?? {};\nconst cards = Array.isArray(input.cards) ? input.cards : [];\n\nfunction decodeEntities(value = '') {\n  return String(value)\n    .replace(/&amp;/g, '&').replace(/&quot;/g, '\"')\n    .replace(/&#39;|&apos;/g, \"'\").replace(/&lt;/g, '<')\n    .replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ')\n    .replace(/&#(\\d+);/g, (_, n) => String.fromCodePoint(Number(n)));\n}\nfunction textFromHtml(html = '') {\n  return decodeEntities(String(html)\n    .replace(/<script\\b[^>]*>[\\s\\S]*?<\\/script>/gi, ' ')\n    .replace(/<style\\b[^>]*>[\\s\\S]*?<\\/style>/gi, ' ')\n    .replace(/<[^>]+>/g, ' ')).replace(/\\s+/g, ' ').trim();\n}\nfunction attr(html, name) {\n  const re = new RegExp('\\\\b' + name + '\\\\s*=\\\\s*([\"\\\\\\'])(.*?)\\\\1', 'i');\n  const m = String(html).match(re);\n  return m ? decodeEntities(m[2]) : '';\n}\nfunction absoluteUrl(href = '') {\n  if (/^https?:\\/\\//i.test(href)) return href;\n  if (href.startsWith('//')) return 'https:' + href;\n  return 'https://www2.hm.com' + (href.startsWith('/') ? href : '/' + href);\n}\nfunction pricesFromCard(html, text) {\n  const found = [];\n  // First look for currency-prefixed prices in visible card text.\n  for (const m of text.matchAll(/(?:£|GBP\\s*)\\s*\\d[\\d,]*(?:\\.\\d{2})?/gi)) found.push(m[0].replace(/\\s+/g, ' ').trim());\n  // Some H&M markup stores the amount in a price-related element without the currency symbol.\n  if (found.length === 0) {\n    const priceFragments = String(html).match(/<(?:span|div|p)[^>]*(?:price|amount)[^>]*>[\\s\\S]*?<\\/(?:span|div|p)>/gi) || [];\n    for (const fragment of priceFragments) {\n      const fragmentText = textFromHtml(fragment);\n      for (const m of fragmentText.matchAll(/\\d[\\d,]*(?:\\.\\d{2})?/g)) found.push(m[0]);\n    }\n  }\n  return [...new Set(found)];\n}\n\nif (!cards.length) {\n  throw new Error('No product cards found. Check HTML output: the selector li:has(a[href*=\"productpage\"]) returned zero cards.');\n}\n\nconst output = [];\nfor (const rawCard of cards) {\n  const card = String(rawCard ?? '');\n  const href = (card.match(/href=[\"']([^\"']*productpage[^\"']*)[\"']/i) || [])[1] || '';\n  if (!href) continue;\n  const url = absoluteUrl(decodeEntities(href));\n  const text = textFromHtml(card);\n\n  let name = attr(card, 'alt') || attr(card, 'aria-label') || attr(card, 'title');\n  if (!name) {\n    const titleMatch = card.match(/<(?:h[1-6]|strong)[^>]*>([\\s\\S]*?)<\\/(?:h[1-6]|strong)>/i);\n    if (titleMatch) name = textFromHtml(titleMatch[1]);\n  }\n  if (!name) {\n    const imageAlt = card.match(/<img\\b[^>]*\\balt=[\"']([^\"']+)[\"']/i);\n    if (imageAlt) name = decodeEntities(imageAlt[1]);\n  }\n\n  const prices = pricesFromCard(card, text);\n  const discountMatch = text.match(/(?:-\\s*)?\\d{1,2}\\s?%/);\n  const discount = discountMatch ? discountMatch[0].replace(/\\s+/g, '').replace(/^(\\d)/, '-$1') : '';\n  if (!name) {\n    name = text.replace(/(?:£|GBP\\s*)\\s*\\d[\\d,]*(?:\\.\\d{2})?/gi, ' ')\n      .replace(/(?:-\\s*)?\\d{1,2}\\s?%/g, ' ')\n      .replace(/\\b(?:sale|view details|quick buy|add to bag)\\b/gi, ' ')\n      .replace(/\\s+/g, ' ').trim();\n  }\n\n  // When two prices are present, H&M cards commonly show the original first and sale price last.\n  // If only one price is present, put it in Price After and leave Price Before blank rather than guessing.\n  const priceBefore = prices.length >= 2 ? prices[0] : '';\n  const priceAfter = prices.length >= 2 ? prices[prices.length - 1] : (prices[0] || '');\n  output.push({ json: {\n    'Product names': name || 'H&M product',\n    'Percentage Off': discount,\n    'Price Before': priceBefore,\n    'Price After': priceAfter,\n    'Url': url\n  }});\n}\nif (!output.length) throw new Error('Cards were found, but no product links could be extracted. Inspect one card HTML.');\nreturn output;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        -80
+      ],
+      "id": "5747c698-bb1a-40dd-b528-115dbb589d72",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "1D1MD8EsSVZGcx42I3aJWWgBf10BizIgAf4SXvkXMxbQ",
+          "mode": "list",
+          "cachedResultName": "H&M offers",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1D1MD8EsSVZGcx42I3aJWWgBf10BizIgAf4SXvkXMxbQ/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1D1MD8EsSVZGcx42I3aJWWgBf10BizIgAf4SXvkXMxbQ/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Product names": "={{ $json[\"Product names\"] }}",
+            "Percentage Off": "={{ $json[\"Percentage Off\"] }}",
+            "Price Before": "={{ $json[\"Price Before\"] }}",
+            "Price After": "={{ $json[\"Price After\"] }}",
+            "Url": "={{ $json[\"Url\"] }}"
+          },
+          "matchingColumns": [
+            "Url"
+          ],
+          "schema": [
+            {
+              "id": "Product names",
+              "displayName": "Product names",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Percentage Off",
+              "displayName": "Percentage Off",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Price Before",
+              "displayName": "Price Before",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Price After",
+              "displayName": "Price After",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Url",
+              "displayName": "Url",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        640,
+        -80
+      ],
+      "id": "06a74a2c-ab03-4a00-bb4f-cc24654bead1",
+      "name": "Append or update row in sheet",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "9sDYKJC7QzNOqrqE",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "removeItemsSeenInPreviousExecutions",
+        "dedupeValue": "Url",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.removeDuplicates",
+      "typeVersion": 2,
+      "position": [
+        400,
+        -80
+      ],
+      "id": "4257786e-6697-40ed-ae39-2029d20101a2",
+      "name": "Remove Duplicates"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "HTML",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTML": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Remove Duplicates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Remove Duplicates": {
+      "main": [
+        [
+          {
+            "node": "Append or update row in sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": true
+  },
+  "versionId": "538e80f4-772e-45f6-9672-34cc28459bf3",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "df12b54eedb201b72d4738d1ac71a211af67d1e1a2812ff260d155b06f439cc7"
+  },
+  "nodeGroups": [],
+  "id": "Y2svAXaIaci4nB6J",
+  "tags": []
+}
